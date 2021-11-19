@@ -35,11 +35,19 @@ describe('stake', () => {
       "confirmed"
     );
 
+    const [stakeAccount, bump] = await anchor.web3.PublicKey.findProgramAddress(
+      [Buffer.from("stake"), payer.publicKey.toBuffer()],
+      program.programId,
+    );
+    console.log('Stake Account', stakeAccount.toBase58(), bump);
+
     // Add your test here.
     const tx = await program.rpc.initialize(
+      bump,
       {
         accounts: {
-          payer: payer.publicKey,
+          stakeAccount,
+          authority: payer.publicKey,
           systemProgram: anchor.web3.SystemProgram.programId,
           // rent: anchor.web3.SYSVAR_RENT_PUBKEY,
         },
@@ -68,15 +76,18 @@ describe('stake', () => {
     await jamboToken.mintTo(jamboMintAccount.address, mintAuthority.publicKey, [mintAuthority], 1);
     console.log('Minted');
 
-    const [stakeAccount, bump] = await anchor.web3.PublicKey.findProgramAddress(
+    const [stakeJamboAccount, bump] = await anchor.web3.PublicKey.findProgramAddress(
       [Buffer.from("stake"), jamboToken.publicKey.toBuffer()],
       program.programId,
     );
-    console.log('Stake Account', stakeAccount.toBase58(), bump);
+    console.log('Stake Account', stakeJamboAccount.toBase58(), bump);
+
+    const prevAccount = await program.account.stakeJamboAccount.fetchNullable(stakeJamboAccount);
+    console.log('Prev Account', prevAccount);
 
     const [jamboMintPool, jamboMintPoolBump] =
     await anchor.web3.PublicKey.findProgramAddress(
-      [stakeAccount.toBuffer(), Buffer.from("jamboMintPool")],
+      [stakeJamboAccount.toBuffer(), Buffer.from("jamboMintPool")],
       program.programId
     );
     console.log('Jambo Mint Pool', jamboMintPool.toBase58());
@@ -85,7 +96,7 @@ describe('stake', () => {
       bump,
       {
         accounts: {
-          stakeAccount,
+          stakeJamboAccount,
           authority: payer.publicKey,
           jamboMint: jamboToken.publicKey,
           jamboMintSrc: jamboMintAccount.address,
@@ -100,7 +111,7 @@ describe('stake', () => {
     );
     console.log("Your transaction 2 signature", tx);
 
-    const account = await program.account.stakeAccount.fetch(stakeAccount);
+    const account = await program.account.stakeJamboAccount.fetch(stakeJamboAccount);
     console.log(account.jamboMint.toBase58(), account.bump);
   });
 
@@ -112,15 +123,15 @@ describe('stake', () => {
     );
     console.log('Jambo Account', jamboMintAccount.address.toBase58());
 
-    const [stakeAccount, bump] = await anchor.web3.PublicKey.findProgramAddress(
+    const [stakeJamboAccount, bump] = await anchor.web3.PublicKey.findProgramAddress(
       [Buffer.from("stake"), jamboToken.publicKey.toBuffer()],
       program.programId,
     );
-    console.log('Stake Account', stakeAccount.toBase58(), bump);
+    console.log('Stake Account', stakeJamboAccount.toBase58(), bump);
 
     const [jamboMintPool, jamboMintPoolBump] =
     await anchor.web3.PublicKey.findProgramAddress(
-      [stakeAccount.toBuffer(), Buffer.from("jamboMintPool")],
+      [stakeJamboAccount.toBuffer(), Buffer.from("jamboMintPool")],
       program.programId
     );
     console.log('Jambo Mint Pool', jamboMintPool.toBase58());
@@ -128,7 +139,7 @@ describe('stake', () => {
     const tx = await program.rpc.unstakeJambo(
       {
         accounts: {
-          stakeAccount,
+          stakeJamboAccount,
           authority: payer.publicKey,
           jamboMint: jamboToken.publicKey,
           jamboMintDest: jamboMintAccount.address,
@@ -143,7 +154,50 @@ describe('stake', () => {
     );
     console.log("Your transaction 3 signature", tx);
 
-    const account = await program.account.stakeAccount.fetch(stakeAccount);
+    const account = await program.account.stakeJamboAccount.fetchNullable(stakeJamboAccount);
+    console.log(account.jamboMint.toBase58(), account.bump);
+  });
+
+  it('can stake again!', async () => {
+    console.log('Jambo Token', jamboToken.publicKey.toBase58());
+
+    const jamboMintAccount = await jamboToken.getOrCreateAssociatedAccountInfo(
+      payer.publicKey
+    );
+    console.log('Jambo Account', jamboMintAccount.address.toBase58());
+
+    const [stakeJamboAccount, bump] = await anchor.web3.PublicKey.findProgramAddress(
+      [Buffer.from("stake"), jamboToken.publicKey.toBuffer()],
+      program.programId,
+    );
+    console.log('Stake Account', stakeJamboAccount.toBase58(), bump);
+
+    const [jamboMintPool, jamboMintPoolBump] =
+    await anchor.web3.PublicKey.findProgramAddress(
+      [stakeJamboAccount.toBuffer(), Buffer.from("jamboMintPool")],
+      program.programId
+    );
+    console.log('Jambo Mint Pool', jamboMintPool.toBase58());
+
+    const tx = await program.rpc.restakeJambo(
+      {
+        accounts: {
+          stakeJamboAccount,
+          authority: payer.publicKey,
+          jamboMint: jamboToken.publicKey,
+          jamboMintSrc: jamboMintAccount.address,
+          jamboMintPool,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          // associatedTokenProgram: SPL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        },
+        signers: [payer]
+      }
+    );
+    console.log("Your transaction 4 signature", tx);
+
+    const account = await program.account.stakeJamboAccount.fetchNullable(stakeJamboAccount);
     console.log(account.jamboMint.toBase58(), account.bump);
   });
 });

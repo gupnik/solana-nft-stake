@@ -10,18 +10,19 @@ const PREFIX: &str = "stake";
 pub mod stake {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> ProgramResult {
-        // let stake_account = &mut ctx.accounts.stake_account;
-        // stake_account.bump = bump;
-        // stake_account.data = data;
+    pub fn initialize(ctx: Context<Initialize>, bump: u8) -> ProgramResult {
+        let stake_account = &mut ctx.accounts.stake_account;
+        stake_account.bump = bump;
+        stake_account.authority = *ctx.accounts.authority.to_account_info().key;
+
         Ok(())
     }
 
     pub fn stake_jambo(ctx: Context<StakeJambo>, bump: u8) -> ProgramResult {
-        let stake_account = &mut ctx.accounts.stake_account;
-        stake_account.bump = bump;
-        stake_account.jambo_mint = *ctx.accounts.jambo_mint.to_account_info().key;
-        stake_account.jambo_mint_pool = *ctx.accounts.jambo_mint_pool.to_account_info().key;
+        let stake_jambo_account = &mut ctx.accounts.stake_jambo_account;
+        stake_jambo_account.bump = bump;
+        stake_jambo_account.jambo_mint = *ctx.accounts.jambo_mint.to_account_info().key;
+        stake_jambo_account.jambo_mint_pool = *ctx.accounts.jambo_mint_pool.to_account_info().key;
 
         // Transfer the underlying assets to the underlying assets pool
         let cpi_accounts = Transfer {
@@ -39,11 +40,11 @@ pub mod stake {
 
     #[access_control(UnstakeJambo::accounts(&ctx))]
     pub fn unstake_jambo(ctx: Context<UnstakeJambo>) -> ProgramResult {
-        let stake_account = &ctx.accounts.stake_account;
+        let stake_jambo_account = &ctx.accounts.stake_jambo_account;
         let seeds = &[
             PREFIX.as_bytes(),
-            stake_account.jambo_mint.as_ref(),
-            &[stake_account.bump]
+            stake_jambo_account.jambo_mint.as_ref(),
+            &[stake_jambo_account.bump]
         ];
         let signer = &[&seeds[..]];
 
@@ -51,7 +52,7 @@ pub mod stake {
         let cpi_accounts = Transfer {
             from: ctx.accounts.jambo_mint_pool.to_account_info(),
             to: ctx.accounts.jambo_mint_dest.to_account_info(),
-            authority: ctx.accounts.stake_account.to_account_info(),
+            authority: ctx.accounts.stake_jambo_account.to_account_info(),
         };
         let cpi_token_program = ctx.accounts.token_program.clone();
         let cpi_ctx = CpiContext::new_with_signer(cpi_token_program, cpi_accounts, signer);
@@ -60,15 +61,35 @@ pub mod stake {
 
         Ok(())
     }
+
+    #[access_control(RestakeJambo::accounts(&ctx))]
+    pub fn restake_jambo(ctx: Context<RestakeJambo>) -> ProgramResult {
+        let stake_jambo_account = &ctx.accounts.stake_jambo_account;
+
+        // Transfer the underlying assets to the underlying assets pool
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.jambo_mint_src.to_account_info(),
+            to: ctx.accounts.jambo_mint_pool.to_account_info(),
+            authority: ctx.accounts.authority.clone(),
+        };
+        let cpi_token_program = ctx.accounts.token_program.clone();
+        let cpi_ctx = CpiContext::new(cpi_token_program, cpi_accounts);
+        let underlying_transfer_amount = 1;
+        token::transfer(cpi_ctx, underlying_transfer_amount)?;
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
-// #[instruction(bump: u8)]
+#[instruction(bump: u8)]
 pub struct Initialize<'info> {   
+    #[account(init, seeds=[PREFIX.as_bytes(), authority.key().as_ref()], bump=bump, payer=authority)] 
+    pub stake_account: Account<'info, StakeAccount>,
     // // #[account(signer, constraint= authority.data_is_empty() && authority.lamports() > 0)]
     // authority: AccountInfo<'info>,
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub authority: Signer<'info>,
     // // #[account(address = system_program::ID)]
     pub system_program: Program<'info, System>,
     // rent: Sysvar<'info, Rent>,
@@ -77,19 +98,19 @@ pub struct Initialize<'info> {
 #[derive(Accounts)]
 #[instruction(bump: u8)]
 pub struct StakeJambo<'info> {
-    #[account(init, seeds=[PREFIX.as_bytes(), &jambo_mint.key().to_bytes()[..]], bump=bump, payer=authority)] 
-    pub stake_account: Account<'info, StakeAccount>,
+    #[account(init, seeds=[PREFIX.as_bytes(), jambo_mint.key().as_ref()], bump=bump, payer=authority)] 
+    pub stake_jambo_account: Account<'info, StakeJamboAccount>,
     #[account(mut, signer)]
     pub authority: AccountInfo<'info>,
     pub jambo_mint: Box<Account<'info, Mint>>,
     #[account(mut)]
     pub jambo_mint_src: Box<Account<'info, TokenAccount>>,
     #[account(init,
-        seeds = [&stake_account.key().to_bytes()[..], b"jamboMintPool"],
+        seeds = [&stake_jambo_account.key().to_bytes()[..], b"jamboMintPool"],
         bump,
         payer = authority,    
         token::mint = jambo_mint,
-        token::authority = stake_account,
+        token::authority = stake_jambo_account,
     )]
     pub jambo_mint_pool: Box<Account<'info, TokenAccount>>,
 
@@ -101,7 +122,12 @@ pub struct StakeJambo<'info> {
 
 #[derive(Accounts)]
 pub struct UnstakeJambo<'info> {
-    pub stake_account: Account<'info, StakeAccount>,
+    #[account(
+        mut,
+        seeds = [PREFIX.as_bytes(), stake_jambo_account.jambo_mint.key().as_ref()],
+        bump = stake_jambo_account.bump
+    )]
+    pub stake_jambo_account: Account<'info, StakeJamboAccount>,
     #[account(mut, signer)]
     pub authority: AccountInfo<'info>,
     pub jambo_mint: Box<Account<'info, Mint>>,
@@ -117,13 +143,51 @@ pub struct UnstakeJambo<'info> {
 }
 impl<'info> UnstakeJambo<'info> {
     fn accounts(ctx: &Context<UnstakeJambo<'info>>) -> ProgramResult {
-        // Validate the mint pool is the same as on the StakeAccount
-        if *ctx.accounts.jambo_mint_pool.to_account_info().key != ctx.accounts.stake_account.jambo_mint_pool {
+        // Validate the mint pool is the same as on the StakeJamboAccount
+        if *ctx.accounts.jambo_mint_pool.to_account_info().key != ctx.accounts.stake_jambo_account.jambo_mint_pool {
             return Err(ErrorCode::JamboMintPoolAccountDoesNotMatchStake.into())
         }
 
-        // Validate the jambo mint is the same as on the StakeAccount
-        if *ctx.accounts.jambo_mint.to_account_info().key != ctx.accounts.stake_account.jambo_mint {
+        // Validate the jambo mint is the same as on the StakeJamboAccount
+        if *ctx.accounts.jambo_mint.to_account_info().key != ctx.accounts.stake_jambo_account.jambo_mint {
+            return Err(ErrorCode::JamboMintDoesNotMatchStake.into())
+        }
+
+        Ok(())
+    }
+}
+
+
+#[derive(Accounts)]
+pub struct RestakeJambo<'info> {
+    #[account(
+        mut,
+        seeds = [PREFIX.as_bytes(), stake_jambo_account.jambo_mint.key().as_ref()],
+        bump = stake_jambo_account.bump
+    )]
+    pub stake_jambo_account: Account<'info, StakeJamboAccount>,
+    #[account(mut, signer)]
+    pub authority: AccountInfo<'info>,
+    pub jambo_mint: Box<Account<'info, Mint>>,
+    #[account(mut)]
+    pub jambo_mint_src: Box<Account<'info, TokenAccount>>,
+    #[account(mut)]
+    pub jambo_mint_pool: Box<Account<'info, TokenAccount>>,
+
+    pub token_program: AccountInfo<'info>,
+    // pub associated_token_program: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+impl<'info> RestakeJambo<'info> {
+    fn accounts(ctx: &Context<RestakeJambo<'info>>) -> ProgramResult {
+        // Validate the mint pool is the same as on the StakeJamboAccount
+        if *ctx.accounts.jambo_mint_pool.to_account_info().key != ctx.accounts.stake_jambo_account.jambo_mint_pool {
+            return Err(ErrorCode::JamboMintPoolAccountDoesNotMatchStake.into())
+        }
+
+        // Validate the jambo mint is the same as on the StakeJamboAccount
+        if *ctx.accounts.jambo_mint.to_account_info().key != ctx.accounts.stake_jambo_account.jambo_mint {
             return Err(ErrorCode::JamboMintDoesNotMatchStake.into())
         }
 
@@ -133,21 +197,28 @@ impl<'info> UnstakeJambo<'info> {
 
 #[account]
 #[derive(Default)]
-pub struct StakeAccount {
+pub struct StakeJamboAccount {
     pub jambo_mint: Pubkey,
     pub jambo_mint_pool: Pubkey,
     pub bump: u8,
 }
 
+#[account]
+#[derive(Default)]
+pub struct StakeAccount {
+    pub authority: Pubkey,
+    pub bump: u8,
+}
+
 // #[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)] 
-// pub struct StakeAccountData {
+// pub struct StakeJamboAccountData {
 //     pub jambo_mint: Pubkey,
 // }
 
 #[error]
 pub enum ErrorCode {
-    #[msg("Mint pool is not same as on the StakeAccount!")]
+    #[msg("Mint pool is not same as on the StakeJamboAccount!")]
     JamboMintPoolAccountDoesNotMatchStake,
-    #[msg("Jambo mint is not same as on the StakeAccountd!")]
+    #[msg("Jambo mint is not same as on the StakeJamboAccount!")]
     JamboMintDoesNotMatchStake,
 }
